@@ -81,10 +81,10 @@ def receive_ack():
 
     return (tcpHdr[2], payloadLen)
 
-def build_ack(ack, win):
+def build_ack(ack, win, seq=start_seq + 1, payload=b''):
     packet = struct.pack("!6s6s2s", mac_dst, mac_src, b'\x08\x00')
     cksum = 0
-    payload_len = 20
+    payload_len = 20 + len(payload)
     ip_header = struct.pack('!BBHHHBBH4s4s', IHL_VERSION, TYPE_OF_SERVICE, 20+payload_len, TTL, DONT_FRAGMENT, 64, socket.IPPROTO_TCP, cksum, socket.inet_aton(ip_src),socket.inet_aton(ip_dst))
     cksum = get_checksum(ip_header)
     ip_header = struct.pack('!BBHHHBBH4s4s', IHL_VERSION, TYPE_OF_SERVICE, 20+payload_len, TTL, DONT_FRAGMENT, 64, socket.IPPROTO_TCP, cksum, socket.inet_aton(ip_src),socket.inet_aton(ip_dst))
@@ -92,37 +92,58 @@ def build_ack(ack, win):
     offset = 5 << 4
     tcp_flags = 0x10  # ACK
     cksum = 0
-    tcp_header = struct.pack('!HHLLBBHHH', tcp_src, tcp_dst, start_seq+1, ack, offset, tcp_flags, win, cksum, 0)
-    pseudo_hdr = struct.pack('!4s4sBBH', socket.inet_aton(ip_src), socket.inet_aton(ip_dst), 0, socket.IPPROTO_TCP, 20)
+    tcp_header = struct.pack('!HHLLBBHHH', tcp_src, tcp_dst, seq, ack, offset, tcp_flags, win, cksum, 0)
+    pseudo_hdr = struct.pack('!4s4sBBH', socket.inet_aton(ip_src), socket.inet_aton(ip_dst), 0, socket.IPPROTO_TCP, payload_len)
     cksum = get_checksum(pseudo_hdr + tcp_header)
-    tcp_header = struct.pack('!HHLLBBHHH', tcp_src, tcp_dst, start_seq+1, ack, offset, tcp_flags, win, cksum, 0)
+    tcp_header = struct.pack('!HHLLBBHHH', tcp_src, tcp_dst, seq, ack, offset, tcp_flags, win, cksum, 0)
+    return packet + tcp_header
+
+def build_sack(ack, win, l, r):
+    packet = struct.pack("!6s6s2s", mac_dst, mac_src, b'\x08\x00')
+    cksum = 0
+    payload_len = 32
+    ip_header = struct.pack('!BBHHHBBH4s4s', IHL_VERSION, TYPE_OF_SERVICE, 20+payload_len, TTL, DONT_FRAGMENT, 64, socket.IPPROTO_TCP, cksum, socket.inet_aton(ip_src),socket.inet_aton(ip_dst))
+    cksum = get_checksum(ip_header)
+    ip_header = struct.pack('!BBHHHBBH4s4s', IHL_VERSION, TYPE_OF_SERVICE, 20+payload_len, TTL, DONT_FRAGMENT, 64, socket.IPPROTO_TCP, cksum, socket.inet_aton(ip_src),socket.inet_aton(ip_dst))
+    packet = packet + ip_header
+    offset = 8 << 4
+    tcp_flags = 0x10  # ACK
+    cksum = 0
+    tcp_header = struct.pack('!HHLLBBHHHBBBBLL', tcp_src, tcp_dst, start_seq+1, ack, offset, tcp_flags, win, cksum, 0, 1, 1, 5, 10, l, r)
+    pseudo_hdr = struct.pack('!4s4sBBH', socket.inet_aton(ip_src), socket.inet_aton(ip_dst), 0, socket.IPPROTO_TCP, payload_len)
+    cksum = get_checksum(pseudo_hdr + tcp_header)
+    tcp_header = struct.pack('!HHLLBBHHHBBBBLL', tcp_src, tcp_dst, start_seq+1, ack, offset, tcp_flags, win, cksum, 0, 1, 1, 5, 10, l, r)
     return packet + tcp_header
 
 # send the SYN
 socket_send.send(build_first_syn() + b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
-ack, llen = receive_ack()
+init_ack, llen = receive_ack()
 assert (llen == 0)
+assert (init_ack + 1 + 1024 * 150 < (1 << 32))
 
 # complete the handshake:
-socket_send.send(build_ack(ack+1, 256) + b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
+socket_send.send(build_ack(init_ack+1, 256) + b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
 
 win = 10000
-counter = 0
 totallen = 0
 while True:
     ack, llen = receive_ack()
     if ack == 0:
         continue
     totallen += llen
-    counter += 1
     if totallen < 20000:
         # ack every single packet at the beginning of the connection
         socket_send.send(build_ack(ack + llen, win) + b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
-    elif totallen == 1024 * 150:
+    elif ack + llen == init_ack + 1 + 1024 * 150:
         # ack the very last packet
         socket_send.send(build_ack(ack + llen, win) + b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
         print ("done!!")
     else:
-        print ("skipping", totallen, llen)
+        print ("skipping")
+        # send a sack:
+        # socket_send.send(build_sack(init_ack + 20001, win, init_ack + 20003, ack+llen ) + b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
+        # make the server send a sack:
+        # socket_send.send(build_ack(ack + llen, win, start_seq + 10, b'abcdef' ) + b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
+
         
 
